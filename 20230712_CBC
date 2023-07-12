@@ -1,0 +1,274 @@
+pacotes <- c("bestNormalize","VGAM","tornado","zoo","cowplot","here","DALEX","ingredients","caret","radiant.model","dfidx","logitr","tidyverse","fastDummies","ggthemes","dplyr","stargazer","conjoint","radiant","ggplot2","mlogit","cbcTools","remotes")
+
+## Install all the needed packages to deploy the model
+
+if(sum(as.numeric(!pacotes %in% installed.packages()))!= 0){
+  instalador <- pacotes[!pacotes %in% installed.packages()]
+  for (i in 1: length(instalador)) {
+    install.packages(instalador,dependencies = T)
+    break()}
+  sapply(pacotes, require, character = T)
+} else {
+  sapply(pacotes,require,character = T)
+}
+
+## Define the levels and attributes
+## Generating Profiles
+profiles <- cbc_profiles(
+                         Price=c(200,250,300,350,375),
+                         Type=c("Chicken","Fish","Beef"),
+                         Freshness=c("Excellent","Average","Poor")
+                         ) %>% distinct() %>% 
+mutate(profileID = seq(n()))
+
+## Here I get the full factorial for those attributes
+profiles
+
+## Generating survey design (full-factorial design of experiment)
+design <- cbc_design( 
+  profiles = profiles,
+  n_resp   = 500, # Number of respondents
+  n_alts   = 3,   # Number of alternatives per question
+  n_q      = 3,# Number of questions per respondent
+  #no_choice = TRUE,# The option where the consumer could choose for none of the attributes
+  )
+head(design)
+
+## Inspect the design
+cbc_balance(design)
+
+##Simulate choices
+df <- cbc_choices(
+  design = design,
+  obsID = "obsID"
+)
+df
+
+##Assessment 
+power <- cbcTools::cbc_power(
+              nbreaks = 10,
+              n_q = 5,
+              data = df,
+              obsID = "obsID",
+              outcome = "choice",
+              pars = c("Price","Type","Freshness")
+                  )
+power
+plot(power)
+
+
+##Write to csv the select items
+write.csv(df, "C:\\Users\\Thales.pr\\Desktop\\20230630Survey.csv", row.names=FALSE)
+
+## Bringing the csv to R
+dados <- read.csv("C:\\Users\\Thale\\Desktop\\20230629_ConjointAnalysis.csv",
+                  sep = ",",
+                  colClasses = c(Price="integer",
+                                 Type="factor",
+                                 Freshness="factor"
+                                )
+                  ) 
+str(dados) ## Verify the structure of the dataset
+View(head(dados)) ## Check dataset
+describe(dados)
+
+## Statistics
+xtabs(choice ~ Price, data=dados)
+xtabs(choice ~ Type, data=dados)
+xtabs(choice ~ Freshness, data=dados)
+
+# Look at unique values in data:
+dados %>% distinct(Price)
+dados %>% distinct(Type)
+dados %>% distinct(Freshness)
+
+# Count number of times each alternative was chosen:
+dados %>% count(altID, choice)
+
+# Visualize how many times each price level was chosen:
+dados %>% count(Price, choice)
+ggplot(dados, aes(x=Price, y=choice)) +
+  geom_bar(stat='identity')
+
+## Data prepare to run the model
+## adding unique identifier
+dados$ID <- row.names(dados)
+view(dados)
+
+# Check if any respondents made the same choice for all questions:
+dados %>% 
+  filter(choice == 1) %>%
+  count(respID, altID) %>% 
+  filter(n == 3) # number of questions
+
+
+#dados <- dados %>% mutate(choice = as.logical(choice))
+#str(dados)
+
+#logit_data <- mlogit.data(dados, choice = "choice", shape = "long", id.var = "ID")
+#head(logit_data)
+
+##Count observations
+sapply(lapply(dados, unique), length)
+values_count <- sapply(lapply(dados, unique), length)
+values_count
+
+#display unique values for each variable
+lapply(dados[c('Price', 'Type', 'Freshness')], unique)
+
+# Visualize how many times each price level was chosen:
+dados %>% count(Price, choice)
+dados %>%
+  ggplot() + 
+  geom_col(aes(x = as.factor(Price), y = choice))
+str(dados)
+
+# Visualize how many Type:
+dados %>% count(Type, choice)
+dados %>%
+  ggplot() + 
+  geom_col(aes(x = as.factor(Type), y = choice))
+
+## Run the model
+set.seed(999) # remember to set the random seed to ensure replicability
+#View(logit_data)
+#str(logit_data)
+
+model <- glm(choice ~ 0 + Price + Type + Freshness, data = dados, family = binomial(link = "logit"))
+summary(model)
+
+##Getting the coefficient amount / Part worth = level of utilities
+mod_summary <- coef(summary(model))[,1:3]
+mod_summary
+
+
+# Create data frames for plotting each attribute:
+#   level   = The attribute level (x-axis)
+#   utility = The utility associated with each level (y-axis)
+df_type <- data.frame(
+  level = c('TypeBeef', 'TypeChicken','TypeFish'),
+  utility = c(model$coefficients['TypeBeef'], 
+              model$coefficients['TypeChicken'], 
+              model$coefficients['TypeFish']))
+df_type
+
+df_Freshnness <- data.frame(
+  level = c('FreshnessExcellent', 'FreshnessPoor'),
+  utility = c(model$coefficients['FreshnessExcellent'], 
+              model$coefficients['FreshnessPoor']))
+df_Freshnness
+
+# Get upper and lower bounds (plots should have the same y-axis)
+utility <- c(
+  df_type$utility, df_Freshnness$utility 
+  ) 
+ymin <- floor(min(utility))
+ymax <- ceiling(max(utility))
+
+# Plot the utility for each attribute Type
+plot_type <- df_type %>% 
+  ggplot() +
+  geom_point(aes(x = level, y = utility)) +
+  scale_y_continuous(limits = c(ymin, ymax)) +
+  labs(x = 'Type of Burguer', y = 'Utility') +
+  theme_bw()
+plot_type
+
+## the utilities measure how much each feature influence the customer decision to select an alternative
+
+# Plot the utility for each attribute
+plot_Freshnness <- df_Freshnness %>% 
+  ggplot() +
+  geom_point(aes(x = level, y = utility)) +
+  scale_y_continuous(limits = c(ymin, ymax)) +
+  labs(x = 'Freshness', y = 'Utility') +
+  theme_bw()
+plot_Freshnness
+
+
+# Plot all plots in one figure
+plot_both <- plot_grid(
+  plot_Freshnness, plot_type,
+  nrow = 1
+)
+plot_both
+
+
+# output 2: attribute importance#
+attr_importance <- data.frame(matrix(NA, nrow=3, ncol=2))
+attr_importance
+
+colnames(attr_importance) <- c('Range', 'Importance')
+attr_importance
+
+rownames(attr_importance) <- c('Price', 'Type', 'Freshness')
+attr_importance
+
+# attribute importance - Range
+attr_importance[1,1] <- max(mod_summary[5], 0) - min(mod_summary[5], 0)
+attr_importance[2,1] <- max(mod_summary[6], 0) - min(mod_summary[6], 0)
+attr_importance[3,1] <- max(mod_summary[7], 0) - min(mod_summary[7], 0)
+attr_importance
+
+
+# attribute importance - Importance
+attr_importance[1,2] <- attr_importance[1,1]/sum(attr_importance$Range)
+attr_importance[2,2] <- attr_importance[2,1]/sum(attr_importance$Range)
+attr_importance[3,2] <- attr_importance[3,1]/sum(attr_importance$Range)
+attr_importance
+
+
+# output 3: wtp
+## To find out our WTP Here we need to divide the feature by utility price
+round(coef(model)["TypeChicken"]/(coef(model)["Price"]), 2)
+round(coef(model)["TypeFish"]/(coef(model)["Price"]), 2)
+round(coef(model)["TypeBeef"]/(coef(model)["Price"]), 2)
+combochicken_excellent <- round(coef(model)["TypeChicken"] + coef(model)["FreshnessExcellent"],2)
+wtpcombochicken_excellent <- combochicken_excellent / (coef(model)["Price"])
+wtpcombochicken_excellent
+
+
+# output 4: Share Prediction
+attributes_conjoint <- 
+              list(Price=c(200,250,300,350,375),
+              Type=c("Chicken","Fish","Beef"),
+             Freshness=c("Excellent","Average","Poor"))
+attributes_conjoint
+
+comp.universe <- expand.grid(attributes_conjoint)[c(5,7,19,23,30,33,38,40),]
+comp.universe
+
+## simulate share in the subset
+simulate_share_m2 <- predict(object = model,newdata = comp.universe, ci = 0.95, returnData = TRUE)
+simulate_share_m2
+
+utilities_values <- simulate_share_m2
+utilities_values
+
+share <- round(exp(utilities_values)/sum(exp(utilities_values)),2)
+shares <- cbind(share,comp.universe)
+shares
+
+# Plot results 
+plot_shares <- as.data.frame(shares) %>%
+  mutate(alt = seq(n()))
+plot_shares 
+
+ggplot(plot_shares,
+      aes(x=as.factor(alt), y=share)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(limits=c(0, 1)) +
+  labs(x='Alternative', y='Market Share') +
+  theme_bw()
+  
+
+# Higher preference for the combination 350 + Chicken + Average quality
+
+# Purchase likelihood option
+# Predicting the probability of a particular set of attributes to be chosen
+# Type Beef + Freshness Excellent + Price 380
+prob_combination <- exp(1)^(-0.0008016605*380-0.0769236-0.3754655)/(1 + exp(1)^(-0.0008016605*380-0.0769236-0.3754655))
+prob_combination
+prob_price_200_Chicken <- exp(1)^(-0.0008016605*200-0.30)/(1 + exp(1)^(-0.0008016605*200-0.30))
+prob_price_300 <- exp(1)^(-0.0008016605*300)/(1 + exp(1)^(-0.0008016605*300))
+prob_price_400 <- exp(1)^(-0.0008016605*400)/(1 + exp(1)^(-0.0008016605*400))
